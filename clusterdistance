@@ -1,0 +1,90 @@
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
+import pandas as pd
+import numpy as np
+import sys
+
+sys.setrecursionlimit(2000)
+
+def discrete_frechet_distance(P: np.ndarray, Q: np.ndarray) -> float:
+
+    ca = np.full((len(P), len(Q)), -1.0)
+
+    def dfd(i: int, j: int) -> float:
+        if ca[i, j] > -1:
+            return ca[i, j]
+        elif i == 0 and j == 0:
+            ca[i, j] = np.linalg.norm(P[0] - Q[0])
+        elif i > 0 and j == 0:
+            ca[i, j] = max(dfd(i - 1, 0), np.linalg.norm(P[i] - Q[0]))
+        elif i == 0 and j > 0:
+            ca[i, j] = max(dfd(0, j - 1), np.linalg.norm(P[0] - Q[j]))
+        elif i > 0 and j > 0:
+            ca[i, j] = max(min(dfd(i - 1, j), dfd(i - 1, j - 1), dfd(i, j - 1)), np.linalg.norm(P[i] - Q[j]))
+        else:
+            ca[i, j] = float('inf')
+        return ca[i, j]
+
+    return dfd(len(P) - 1, len(Q) - 1)
+
+def fill_na_coordinates(data: pd.DataFrame, x_coord_column: str, y_coord_column: str) -> pd.DataFrame:
+
+    data[x_coord_column] = data[x_coord_column].ffill().bfill()
+    data[y_coord_column] = data[y_coord_column].ffill().bfill()
+    return data
+
+def extract_player_path_corrected(data, play_id, x_coord_column, y_coord_column):
+    filtered_data = data[data['Play ID'] == play_id].copy()
+    filtered_data = fill_na_coordinates(filtered_data, x_coord_column, y_coord_column)
+    player_path = filtered_data[[x_coord_column, y_coord_column]].dropna().values
+    return player_path
+
+player_columns = [
+    ('Bobby Portis X Coordinate', 'Bobby Portis Y Coordinate'),
+    ('Marcus Smart X Coordinate', 'Marcus Smart Y Coordinate')
+]
+
+new_file_path = r'' 
+new_data = pd.read_csv(new_file_path)
+unique_play_ids = new_data['Play ID'].unique()
+
+frechet_distances_comparisons = {}
+for i, play_id_1 in enumerate(unique_play_ids):
+    for play_id_2 in unique_play_ids[i + 1:]:
+        for x_coord_column, y_coord_column in player_columns:
+            path_play1 = extract_player_path_corrected(new_data, play_id_1, x_coord_column, y_coord_column)
+            path_play2 = extract_player_path_corrected(new_data, play_id_2, x_coord_column, y_coord_column)
+
+            if path_play1.size > 0 and path_play2.size > 0:
+                fd = discrete_frechet_distance(path_play1, path_play2)
+                key = f"Play {play_id_1} vs Play {play_id_2} - {x_coord_column.split()[0]}"
+                frechet_distances_comparisons[key] = fd
+
+n_clusters = 10
+
+play_ids = list(unique_play_ids)
+distance_matrix = np.zeros((len(play_ids), len(play_ids)))
+
+for i, play_id_1 in enumerate(play_ids):
+    for j, play_id_2 in enumerate(play_ids[i+1:], i+1):
+        distance_sum = sum(frechet_distances_comparisons.get(f"Play {play_id_1} vs Play {play_id_2} - {col.split()[0]}", 0)
+                          for col in ['Bobby Portis', 'Marcus Smart'])
+        distance_matrix[i, j] = distance_matrix[j, i] = distance_sum
+
+condensed_matrix = squareform(distance_matrix, checks=False)
+linkage_matrix = linkage(condensed_matrix, method='average')
+clusters = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
+
+clusters_mapping = {play_id: cluster for play_id, cluster in zip(play_ids, clusters)}
+print(clusters_mapping)
+
+play_id_cluster_df = pd.DataFrame(list(clusters_mapping.items()), columns=['Play ID', 'Cluster'])
+
+if 'is_Scored' in new_data.columns:
+    merged_data = pd.merge(play_id_cluster_df, new_data[['Play ID', 'is_Scored']].drop_duplicates(), on='Play ID')
+    scored_percentage_by_cluster = merged_data.groupby('Cluster')['is_Scored'].mean() * 100
+    data_points_per_cluster = merged_data.groupby('Cluster').size()
+    print("Percentage score per cluster:")
+    print(scored_percentage_by_cluster)
+    print("Number of plays within cluster (to show how often we should run the play):")
+    print(data_points_per_cluster)
